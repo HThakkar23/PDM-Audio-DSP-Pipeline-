@@ -1,142 +1,88 @@
-# PDM mic -> CIC decimator -> VU meter / delta-sigma speaker
+# PDM Microphone to Speaker: CIC Filter and Delta-Sigma DAC on an FPGA
 
-A standalone audio DSP pipeline built in Verilog for the Real Digital
-Blackboard (Zynq-7000, XC7Z007S): the onboard PDM microphone's raw 1-bit
-oversampled bitstream is decimated into real 16-bit PCM audio by a
-from-scratch CIC (cascaded integrator-comb) filter, that PCM drives an
-8-level LED VU meter, and it is re-modulated by a from-scratch
-delta-sigma DAC back out to the onboard speaker pin. No UART, no host
-link, no PC software of any kind -- every bit of DSP here runs in FPGA
-fabric the instant the board powers up.
+![Verilog](https://img.shields.io/badge/Verilog-1F6FEB?style=flat-square)
+![Python](https://img.shields.io/badge/Models-Python-3776AB?style=flat-square)
+![DSP](https://img.shields.io/badge/DSP-CIC%20%2B%20Delta--Sigma-444?style=flat-square)
+![Board](https://img.shields.io/badge/Board-Real%20Digital%20Blackboard-444?style=flat-square)
 
-This is the third project on this board, after an earlier UART-to-VGA
-terminal and a logic analyzer, and after a UART-to-AXI4-Lite bridge.
-Those three all centered on getting a host link's protocol exactly
-right; this one deliberately drops the host link altogether and spends
-its effort on signal processing instead, because the Blackboard, like
-most dev boards in this class, has no dedicated audio codec IC on
-it -- just a bare PDM microphone and a single raw speaker pin -- so
-getting from one to real audio samples and back is itself the design
-problem, not a vendor IP core away. Every number below comes from a
-Python script in `scripts/`, run and checked by hand, not from guessing;
-section 3 of `scripts/cic_filter_calc.py` even measures the filter's
-step-response latency by running a cycle-accurate re-implementation of
-the actual RTL's register transfer logic, rather than hand-tracing it.
+A standalone audio pipeline in Verilog for the Real Digital Blackboard (Zynq-7000, XC7Z007S). The board's PDM microphone gives a raw 1-bit stream. A CIC decimation filter I wrote turns it into 16-bit audio samples, those samples drive an LED volume meter, and a delta-sigma modulator I also wrote turns them back into a 1-bit stream for the board's speaker pin. There is no UART, no host link and no PC software. Program the board and it runs.
 
-## What it does
+This is the fourth project on this board, after a [UART to VGA terminal](https://github.com/HThakkar23/uart-vga-terminal), a [logic analyzer](https://github.com/HThakkar23/logic-analyzer) and a [UART to AXI4-Lite bridge](https://github.com/HThakkar23/axi-lite-bridge). Those three were about getting a host link protocol exactly right. This one drops the host link and spends the effort on signal processing, because the Blackboard has no audio codec chip on the pins this uses. It has a bare PDM microphone and a single raw speaker pin, so getting from one to real audio samples and back is itself the design problem.
 
-Program the board and the pipeline runs on its own:
+Every number below comes from a Python script in `scripts/` or from a simulation I ran. The step response numbers come from a cycle-accurate Python copy of the RTL, not from hand tracing.
+
+<!-- Add a photo of the board or a short clip of the LED meter reacting to sound, for example: ![demo](docs/demo.gif) -->
+
+## Quick Start
+
+**Needs:** Vivado (2019.2 or newer) and a Real Digital Blackboard. Nothing else.
 
 ```
-PDM mic -> pdm_clk_gen -> 2-FF sync -> cic_decimator -> vu_meter -> led[9:2]/led[1]
-                                              |
-                                              v
-                                       delta_sigma_dac -> audio_out (speaker pin)
+git clone https://github.com/HThakkar23/pdm-audio-dsp
 ```
 
-Tap the board's case or talk near the microphone and the LED bar on
-`led[9:2]` tracks the loudness in real time with a smooth peak-with-decay
-response instead of flickering on every sample; `led[1]` lights when the
-signal gets close to clipping. The same decimated PCM feeds a 1-bit
-delta-sigma modulator running at the full 100 MHz clock, so the speaker
-pin carries a heavily oversampled bitstream whose average directly
-tracks the microphone's waveform -- a real, if small, 1-bit DAC, not a
-simple PWM tone generator.
-
-## Why a CIC filter and a delta-sigma modulator, not vendor IP
-
-A PDM microphone's output is not audio samples; it is a single wire
-toggling at a few megahertz whose *density* of 1s over time encodes the
-waveform (pulse density modulation). Turning that into usable PCM needs
-a decimation filter, and the CIC structure -- integrators at the fast
-bit rate, combs at the slow decimated rate -- is the standard answer
-because it needs no multiplier at all when the input is already a 1-bit
-signal: every stage in `cic_decimator.v` is a plain adder or subtractor.
-The design is sized directly from Hogenauer's 1981 register-growth
-bound (`ceil(N*log2(R))` extra bits for an N-th order, R:1 CIC, derived
-and checked in `scripts/cic_filter_calc.py`) and deliberately never
-saturates any intermediate stage -- it relies on 2's-complement
-wraparound canceling correctly in the final comb, which is exactly what
-makes a CIC filter work without per-stage clipping logic (see "A design
-detail worth knowing about" below for the one input where that
-assumption meets its edge).
-
-Driving the speaker pin back out has the mirror problem: there is no
-DAC IC on this pin, only a bare digital output documented as accepting
-PWM or PDM drive. A first-order error-feedback delta-sigma modulator
-turns each 16-bit PCM sample into a 1-bit stream whose running average
-tracks it, pushing quantization noise up out of the audio band by
-oversampling -- the same noise-shaping principle real audio DACs use,
-built here from a single adder, a comparator, and one feedback register
-(`delta_sigma_dac.v`).
-
-## Architecture
+In the Vivado Tcl console:
 
 ```
-  onboard PDM mic (SPK0833LM4H)
-        |  1-bit bitstream @ 3.125 MHz
-        v
-  pdm_clk_gen  (divides 100 MHz -> 3.125 MHz mic clock)
-        |
-        v
-  2-FF synchronizer        (crosses the mic's async data pin safely)
-        |
-        v
-  cic_decimator            (sinc^3, 64:1, 1-bit PDM -> signed 16-bit PCM)
-        |            \
-        v             \
-  vu_meter               \
-  (8-level LED bar,       \
-   peak-with-decay,        v
-   clip flag)         delta_sigma_dac   (16-bit PCM -> 1-bit, 100 MHz oversampled)
-        |                       |
-        v                       v
-     led[9:1]              audio_out (speaker pin)
+cd pdm-audio-dsp
+source scripts/create_project.tcl
 ```
 
-Single clock domain throughout, same as the UART-to-AXI4-Lite bridge:
-the mic clock divider, the CIC decimator, and the delta-sigma modulator
-all run from the single 100 MHz board oscillator, so there is no
-Clocking Wizard IP and no clock domain crossing anywhere in this design
-beyond the one 2-FF synchronizer the mic's asynchronous data pin needs.
+Run synthesis, implementation and bitstream generation, then program the board. Talk near the microphone or tap the case and the LED bar on `led[9:2]` follows the loudness. `led[1]` lights when the signal gets close to clipping, and the speaker pin carries the re-modulated audio.
 
-### Module list
+The microphone and speaker pins in `constr/blackboard_pdm.xdc` were read without an IOSTANDARD attached, so check that one against your board's master XDC before building. Full steps are in [SETUP.md](SETUP.md).
 
-| File | Role |
-|---|---|
-| `pdm_clk_gen.v` | divides 100 MHz down to the PDM mic's 3.125 MHz bit clock |
-| `cic_decimator.v` | sinc^3 CIC filter, 64:1 decimation, PDM bitstream to signed 16-bit PCM |
-| `vu_meter.v` | peak-with-decay envelope follower, 8-level LED bar + clip flag |
-| `delta_sigma_dac.v` | 1st-order error-feedback delta-sigma modulator, PCM to 1-bit speaker drive |
-| `reset_sync.v` | clean reset release, reused unchanged from the other two projects |
-| `pdm_audio_top.v` | top level, wires everything above together, plus the heartbeat LED |
+## What a PDM microphone actually gives you
+
+The output of a PDM microphone is not audio samples. It is one wire toggling at a few megahertz, and the density of 1s over time encodes the waveform: lots of 1s means the sound pressure is high, lots of 0s means it is low. To get usable audio out of that you need a decimation filter that averages many bits into one multi-bit sample.
+
+The standard answer is a CIC (cascaded integrator-comb) filter. Integrators run at the fast bit rate and combs run at the slow output rate, and when the input is already 1 bit, every stage is a plain adder or subtractor. There is no multiplier anywhere in `cic_decimator.v`.
+
+## How the design fits together
+
+```mermaid
+flowchart LR
+    M[PDM mic<br/>3.125 MHz bitstream] --> S[2-FF synchronizer]
+    G[pdm_clk_gen<br/>100 MHz / 32] -->|mic clock| M
+    S --> C[cic_decimator<br/>sinc^3, 64:1]
+    C -->|16-bit PCM @ 48,828 Hz| V[vu_meter<br/>8 LEDs + clip flag]
+    C --> D[delta_sigma_dac<br/>1-bit @ 100 MHz]
+    D --> A[audio_out<br/>speaker pin]
+```
+
+It is a single clock domain. The mic clock divider, the decimator and the modulator all run from the 100 MHz board oscillator, so there is no clock wizard and no clock domain crossing, apart from the 2-FF synchronizer the mic's asynchronous data pin needs.
+
+### Sizing the CIC filter
+
+A CIC filter of order N with decimation ratio R needs `ceil(N * log2(R))` extra bits to hold its internal sums without losing information (Hogenauer, 1981). Here N is 3 and R is 64, so the growth is `3 * 6 = 18` bits. The input is 1 bit (plus or minus 1), so the accumulators are 19 bits wide. `scripts/cic_filter_calc.py` derives that and checks it against the parameter in `cic_decimator.v`.
+
+Nothing in the design saturates. Every integrator and comb is left to wrap in 2's complement, which is exactly what makes a CIC filter work: as long as every stage is wide enough, the wraparounds cancel out in the final comb. The decimated output is the top 16 bits of that 19 bit result.
+
+### Going back out: the delta-sigma DAC
+
+The speaker pin has no DAC chip behind it, just a digital output meant for PWM or PDM drive. A 1st-order error-feedback delta-sigma modulator turns each 16-bit sample into a 1-bit stream whose running average follows the sample. The oversampling pushes the quantization noise up and out of the audio band, which is the same noise-shaping idea real audio DACs use. Mine is one adder, one comparator and one feedback register (`delta_sigma_dac.v`).
 
 ## The numbers
 
-These come straight out of `scripts/cic_filter_calc.py` and
-`scripts/delta_sigma_calc.py`, which you can run yourself with a plain
-Python install (no dependencies beyond the standard library).
-
-**CIC decimator (`cic_filter_calc.py`).**
+**CIC decimator** (`cic_filter_calc.py`):
 
 ```
-ACC_WIDTH (Hogenauer-derived)   : 19 bits       (ceil(3 * log2(64)) + 1 sign bit)
-PDM bit clock                   : 3,125,000.000 Hz
-Decimated PCM sample rate       : 48,828.125 Hz
-Output Nyquist                  : 24,414.0625 Hz
+ACC_WIDTH (Hogenauer)     : 19 bits   (ceil(3 * log2(64)) + 1 sign bit)
+PDM bit clock             : 3,125,000 Hz
+Decimated PCM sample rate : 48,828.125 Hz
+Output Nyquist            : 24,414.0625 Hz
 ```
 
-Step-response latency, *measured* by running a cycle-accurate Python
-model of the exact RTL (same register widths, same nonblocking-update
-order) through a 12.5%/87.5% duty-cycle step, not hand-traced:
+Step response, measured by driving a cycle-accurate Python copy of the RTL (same register widths, same nonblocking update order) with a step from 12.5% to 87.5% duty:
 
 ```
-first decimated sample to change : 304 PDM bit periods =  9,728 clk cycles =  97.28 us
-fully settled                    : 496 PDM bit periods = 15,872 clk cycles = 158.72 us
-(classical CIC group-delay estimate N*(R-1)/2 = 94.5 PDM periods, for comparison only)
+first decimated sample to change : 304 PDM bit periods =  9,728 clocks =  97.28 us
+fully settled                    : 496 PDM bit periods = 15,872 clocks = 158.72 us
 ```
 
-Passband droop (sinc^3 magnitude response, relative to DC):
+The textbook group delay estimate for this filter, `N*(R-1)/2 = 94.5` PDM periods, is smaller, because group delay is an average delay and not the time to fully settle.
+
+Passband droop of the sinc^3 response, relative to DC:
 
 ```
    300 Hz (telephone band low edge)  :  -0.002 dB
@@ -145,82 +91,93 @@ Passband droop (sinc^3 magnitude response, relative to DC):
         output Nyquist               : -11.765 dB
 ```
 
-Flat to within a fifth of a dB across the entire telephone voice band,
-which is the relevant comparison for a microphone pipeline sized for
-speech-range audio rather than full 20 kHz hi-fi.
+That is flat to within a fifth of a dB across the telephone voice band. Past 8 kHz the droop gets noticeable, which is why I sized this for speech and not for full 20 kHz audio.
 
-**Delta-sigma DAC (`delta_sigma_calc.py`).**
+**Delta-sigma DAC** (`delta_sigma_calc.py`):
 
 ```
-Oversampling ratio (OSR)         : 2048   (100,000,000 Hz / 48,828.125 Hz, exact)
-Theoretical in-band SNR          : 101.95 dB   (1st-order, 1-bit, standard noise-shaping formula)
-Effective resolution (ENOB)      : 16.64 bits
+Oversampling ratio (OSR)       : 2048   (100 MHz / 48,828.125 Hz, exact)
+Theoretical in-band SNR        : 101.95 dB
+Effective resolution           : 16.64 bits
 ```
 
+The SNR is calculated from the standard noise-shaping formula for a 1st-order, 1-bit loop. It is a theoretical figure, not a measurement of the speaker output. Here is how order and OSR trade off:
+
 ```
-  order | OSR=64  | OSR=256 | OSR=1024 | OSR=2048
+  order | OSR=64    | OSR=256   | OSR=1024  | OSR=2048
       1 |  56.79 dB |  74.86 dB |  92.92 dB | 101.95 dB  <- this design
       2 |  85.19 dB | 115.30 dB | 145.40 dB | 160.45 dB
       3 | 112.83 dB | 154.98 dB | 197.12 dB | 218.20 dB
 ```
 
-The 1st-order, 1-bit loop this design uses trades the extra ~58 dB a
-2nd-order loop would buy at the same OSR for a single adder and
-comparator with no stability compensation to design -- a deliberate
-simplicity trade, not an oversight.
+A 2nd-order loop at the same OSR would buy about 58 dB more. I stayed with 1st order because it needs no stability analysis, which is a deliberate trade for simplicity, not an oversight.
 
-**VU meter decay.** `DECAY_SHIFT = 6` gives an envelope time constant of
-64 decimated samples, 1.31 ms at the 48,828.125 Hz decimated rate --
-fast enough to feel responsive, slow enough not to flicker on individual
-samples.
+**VU meter.** `DECAY_SHIFT = 6` gives an envelope time constant of 64 decimated samples, 1.31 ms at the output rate. That is fast enough to feel responsive and slow enough not to flicker on individual samples.
 
 ## A design detail worth knowing about
 
-`cic_decimator.v` never saturates: every integrator and comb stage is
-left to wrap in 2's complement, which is what makes a CIC filter's math
-work without per-stage clipping logic. That assumption has exactly one
-edge, and `scripts/cic_filter_calc.py` (section 5) runs it directly
-rather than leaving it as a hand-wave: a literal, sustained all-1s (or
-all-0s) PDM bitstream is the one input whose ideal decimated output,
-+-32,768, does not itself fit in the signed 16-bit range
-(-32,768..+32,767) that `OUT_WIDTH` provides, so it silently wraps to
-the opposite sign. Confirmed by the calc script: an all-0s steady state
-settles at exactly -32,768, and a sustained all-1s input, chasing that
-same ideal +32,768, wraps right back around to -32,768 instead of the
-positive full-scale value one would expect. Real microphone audio is
-AC-coupled and never a sustained DC rail, so this never triggers in
-normal operation -- it is exactly the one input `tb_cic_decimator.v`'s
-own header comment already flagged as deliberately not exercised, now
-backed by an actual run rather than just a comment.
+Because the decimator never saturates, there is exactly one input where the wraparound assumption fails: a sustained all-1s or all-0s bitstream. Its ideal output is plus or minus 32,768, and +32,768 does not fit in a signed 16-bit number (range -32,768 to +32,767). The calc script runs it instead of leaving it as a hand-wave. All-0s settles at exactly -32,768 as expected, and a sustained all-1s input, chasing +32,768, wraps around to -32,768 as well.
 
-## Repository layout
+Real microphone audio is AC-coupled and never sits on a DC rail, so this does not happen in normal use. It is also the one input the testbench deliberately does not drive, and now the script backs that up with an actual run.
+
+## Simulation
+
+I ran both testbenches with Icarus Verilog 12 and both report `ALL CHECKS PASSED`:
+
+| Testbench | Check | Result |
+| --- | --- | --- |
+| `tb_cic_decimator` | 50% duty input | settles to 0 |
+| | 87.5% duty input | settles at 24,576 |
+| | 12.5% duty input | settles at -24,576 |
+| `tb_delta_sigma_dac` | zero input | 50.00% output duty |
+| | +half scale | 75.00% output duty |
+| | -half scale | 25.00% output duty |
+
+The CIC numbers match the hand calculation in the testbench header. A DC input `x` of 0.75 should settle at `0.75 * 262,144 / 8 = 24,576`, which is exactly what comes out.
 
 ```
-rtl/        Verilog source for every module
-sim/        self checking testbenches (see SETUP.md for how to run them)
-scripts/    Python scripts that compute the numbers quoted above, and the Tcl build script
-constr/     Vivado XDC pin and timing constraints
-SETUP.md    step by step build and bring up instructions
+iverilog -g2012 -o sim_cic.out rtl/cic_decimator.v sim/tb_cic_decimator.v && vvp sim_cic.out
+iverilog -g2012 -o sim_dac.out rtl/delta_sigma_dac.v sim/tb_delta_sigma_dac.v && vvp sim_dac.out
 ```
 
-There is no `host/` directory in this project, unlike the other two --
-there is nothing for a PC to talk to here.
+The CIC testbench drives its inputs on the falling clock edge. My first version drove them on the rising edge with blocking assignments, which races the design under test and made the decimator look dead in some simulators. The mic clock generator, the VU meter and the top level do not have a testbench.
 
-## Building it
+## Repository structure
 
-See [SETUP.md](SETUP.md) for the full walkthrough, including the one
-IOSTANDARD worth a quick double check against your specific board
-revision before building, and what to expect the moment the board is
-programmed (there is no host script to run afterward).
+```
+pdm-audio-dsp/
+├── constr/
+│   └── blackboard_pdm.xdc       # mic and speaker pins, check IOSTANDARD
+├── rtl/
+│   ├── pdm_audio_top.v          # top level
+│   ├── pdm_clk_gen.v            # 100 MHz down to the 3.125 MHz mic clock
+│   ├── cic_decimator.v          # sinc^3, 64:1, PDM to 16-bit PCM
+│   ├── vu_meter.v               # peak with decay, 8 LEDs + clip flag
+│   ├── delta_sigma_dac.v        # 1st-order, PCM to 1-bit speaker drive
+│   └── reset_sync.v
+├── scripts/
+│   ├── create_project.tcl
+│   ├── cic_filter_calc.py       # register growth, latency, droop, edge case
+│   └── delta_sigma_calc.py      # OSR, SNR, order comparison, VU decay
+├── sim/
+│   ├── tb_cic_decimator.v
+│   └── tb_delta_sigma_dac.v
+└── SETUP.md
+```
 
-## Possible extensions
+There is no `host/` folder in this project, since there is nothing for a PC to talk to.
 
-A few directions this could go if picked back up later: a 2nd-order
-delta-sigma loop to use the ~58 dB of extra headroom the comparison
-table above shows is on the table, at the cost of a stability analysis
-a 1st-order loop does not need; a simple FIR equalizer after the CIC to
-compensate its sinc^3 droop before it becomes audible at wider
-bandwidths than the telephone band this was sized for; or routing the
-decimated PCM out over the existing UART-to-AXI4-Lite bridge's register
-file instead of (or alongside) the onboard speaker, to capture real
-waveforms on a host for analysis.
+## Areas for improvement
+
+- **A 2nd-order delta-sigma loop.** It is where the extra 58 dB is, at the cost of a real stability analysis.
+- **A droop equalizer.** A small FIR after the CIC to flatten the sinc^3 droop before it becomes audible at wider bandwidths than the telephone band.
+- **Get the audio to a PC.** Route the PCM out over the AXI4-Lite bridge's register file to capture real waveforms on a host, and measure the actual speaker output SNR instead of quoting the theoretical one.
+- **A testbench for the top level.** Feed a synthetic PDM tone in and check the meter and the DAC output together.
+
+## References and resources
+
+- E. B. Hogenauer, "An Economical Class of Digital Filters for Decimation and Interpolation," IEEE Transactions on Acoustics, Speech, and Signal Processing, 1981. The register growth bound used above.
+- R. Schreier and G. Temes, "Understanding Delta-Sigma Data Converters," for the noise-shaping SNR formula.
+- The datasheet for the board's PDM microphone (SPK0833LM4H) for its clock range and output format.
+- Real Digital Blackboard: https://www.realdigital.org/hardware/blackboard
+- My earlier projects on this board: https://github.com/HThakkar23/uart-vga-terminal, https://github.com/HThakkar23/logic-analyzer and https://github.com/HThakkar23/axi-lite-bridge
